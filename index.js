@@ -7,8 +7,17 @@ const cors = require("cors");
 app.use(cors());
 let collection;
 
+const Twitter = require("twitter");
+const { TwitterApi } = require("twitter-api-v2");
+const dotenv = require("dotenv");
+
+dotenv.config();
+
+const fetch = require("node-fetch");
+const fs = require("fs");
+
 const { MongoClient, ServerApiVersion } = require("mongodb");
-const uri = "mongorue&w=majority";
+const uri = `mongodb+srv://${process.env.MONGO_ACCESS}@cluster0.ur4pw.mongodb.net/?retryWrites=true&w=majority`;
 const client = new MongoClient(uri, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -21,20 +30,80 @@ client.connect(err => {
 
 const url = "https://www.blic.rs/blicstrip";
 
+const userClient = new TwitterApi({
+  appKey: process.env.CONSUMER_KEY,
+  appSecret: process.env.CONSUMER_SECRET,
+  accessToken: process.env.ACCESS_TOKEN_KEY,
+  accessSecret: process.env.ACCESS_TOKEN_SECRET
+});
+
 app.get("/", function (req, res) {
   res.json("This is my webscraper");
 });
 
-app.get("/test", async (req, res) => {
-  const res2 = await client
+app.get("/download-all", async (req, res) => {
+  const slike = await client
     .db("blicstrip")
     .collection("strips")
     .find()
-    .sort({ dateObj: -1 });
-  res2.toArray(function (err, result) {
-    result.forEach(r => {
-      console.log(r.date);
+    .toArray();
+
+  let requests,
+    urls = [],
+    dates = [];
+
+  slike.forEach(r => {
+    urls.push(r.img);
+    dates.push(r.date);
+  });
+
+  requests = urls.map(url => fetch(url));
+
+  // Now we wait for all the requests to resolve and then save them locally
+  Promise.all(requests).then(files => {
+    files.forEach((file, i) => {
+      file.body.pipe(fs.createWriteStream(`stripovi/${dates[i]}.jpg`));
     });
+
+    res.json("gotovo");
+  });
+});
+
+const tweetStrip = async date => {
+  const mediaId = await userClient.v1.uploadMedia(`./stripovi/${date}.jpg`);
+  await userClient.v1.tweet(date, { media_ids: [mediaId] });
+};
+
+app.get("/tweet", async (req, res) => {
+  const mediaId = await userClient.v1.uploadMedia("./stripovi/31.08.2017.jpg");
+  await userClient.v1.tweet("Blic Strip kreće!", { media_ids: [mediaId] });
+  res.json("Good");
+});
+
+app.get("/post-tweet", async (req, res) => {
+  const stripovi = await client
+    .db("blicstrip")
+    .collection("strips")
+    .find({ posted: { $nin: [true] } })
+    .sort({ dateObj: 1 })
+    .limit(1);
+
+  stripovi.toArray(async (err, result) => {
+    res.json(result[0].date);
+
+    await tweetStrip(result[0].date);
+
+    client
+      .db("blicstrip")
+      .collection("strips")
+      .updateOne(
+        {
+          adresa: result[0].adresa
+        },
+        {
+          $set: { posted: true }
+        }
+      );
   });
 });
 
