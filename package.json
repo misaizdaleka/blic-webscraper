@@ -16,7 +16,6 @@
     "express": "^4.17.1",
     "mongodb": "^4.6.0",
     "node-fetch": "^2.6.7",
-    "twitter": "^1.7.1",
     "twitter-api-v2": "^1.12.3"
   },
   "devDependencies": {

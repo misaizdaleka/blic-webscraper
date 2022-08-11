@@ -7,7 +7,6 @@ const cors = require("cors");
 app.use(cors());
 let collection;
 
-const Twitter = require("twitter");
 const { TwitterApi } = require("twitter-api-v2");
 const dotenv = require("dotenv");
 
@@ -17,14 +16,15 @@ const fetch = require("node-fetch");
 const fs = require("fs");
 
 const { MongoClient, ServerApiVersion } = require("mongodb");
+const { json } = require("express");
 const uri = `mongodb+srv://${process.env.MONGO_ACCESS}@cluster0.ur4pw.mongodb.net/?retryWrites=true&w=majority`;
-const client = new MongoClient(uri, {
+const mongo = new MongoClient(uri, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
   serverApi: ServerApiVersion.v1
 });
-client.connect(err => {
-  collection = client.db("blicstrip").collection("strips");
+mongo.connect(err => {
+  collection = mongo.db("blicstrip").collection("strips");
   // perform actions on the collection object
 });
 
@@ -42,7 +42,7 @@ app.get("/", function (req, res) {
 });
 
 app.get("/download-all", async (req, res) => {
-  const slike = await client
+  const slike = await mongo
     .db("blicstrip")
     .collection("strips")
     .find()
@@ -69,43 +69,33 @@ app.get("/download-all", async (req, res) => {
   });
 });
 
-const tweetStrip = async date => {
-  const mediaId = await userClient.v1.uploadMedia(`./stripovi/${date}.jpg`);
-  await userClient.v1.tweet(date, { media_ids: [mediaId] });
-};
-
 app.get("/tweet", async (req, res) => {
   const mediaId = await userClient.v1.uploadMedia("./stripovi/31.08.2017.jpg");
   await userClient.v1.tweet("Blic Strip kreće!", { media_ids: [mediaId] });
   res.json("Good");
 });
 
-app.get("/post-tweet", async (req, res) => {
-  const stripovi = await client
+app.get("/testing-grounds", async (req, res) => {
+  const latest = await mongo
     .db("blicstrip")
     .collection("strips")
     .find({ posted: { $nin: [true] } })
-    .sort({ dateObj: 1 })
+    .sort({ dateObj: -1 })
     .limit(1);
 
-  stripovi.toArray(async (err, result) => {
-    res.json(result[0].date);
-
-    await tweetStrip(result[0].date);
-
-    client
-      .db("blicstrip")
-      .collection("strips")
-      .updateOne(
-        {
-          adresa: result[0].adresa
-        },
-        {
-          $set: { posted: true }
-        }
-      );
-  });
+  return res.json(await latest.toArray()).pop();
 });
+
+const fetchLatestStrip = async () => {
+  const latest = await mongo
+    .db("blicstrip")
+    .collection("strips")
+    .find({ posted: { $nin: [true] } })
+    .sort({ dateObj: -1 })
+    .limit(1);
+
+  return res.json(await latest.toArray()).pop();
+};
 
 app.get("/results", (req, res) => {
   const saveImgsAndGenerateHtml = responses => {
@@ -122,7 +112,7 @@ app.get("/results", (req, res) => {
           return;
         }
         imgs.push("http:" + $(this).attr("srcset"));
-        client
+        mongo
           .db("blicstrip")
           .collection("strips")
           .updateOne(
@@ -142,8 +132,47 @@ app.get("/results", (req, res) => {
     return res.end(htmlImgs);
   };
 
+  const saveImgs = responses => {
+    responses.forEach(response => {
+      if (response.img) {
+        return;
+      }
+      const html = response.data;
+      const $ = cheerio.load(html);
+      $("div.img-wrapper img", html).each(function () {
+        if (!$(this).attr("srcset")) {
+          return;
+        }
+        mongo
+          .db("blicstrip")
+          .collection("strips")
+          .updateOne(
+            {
+              adresa: response.config.url
+            },
+            {
+              $set: { img: "http:" + $(this).attr("srcset") }
+            }
+          );
+      });
+    });
+
+    const filteredResponses = responses.filter(r => !!r.img);
+    requests = filteredResponses.map(r => fetch(r.img));
+
+    // Now we wait for all the requests to resolve and then save them locally
+    return Promise.all(requests).then(files => {
+      files.forEach((file, i) => {
+        file.body.pipe(
+          fs.createWriteStream(`stripovi/${filteredResponses[i].date}.jpg`)
+        );
+      });
+    });
+  };
+
   const fetchStrips = suffix => {
     const articles = [];
+    const articleDates = {};
     return axios(url + suffix)
       .then(response => {
         const html = response.data;
@@ -173,8 +202,9 @@ app.get("/results", (req, res) => {
 
           const url = link;
           articles.push(url);
+          articleDates[url] = new Date(+year, +month - 1, +day).valueOf();
           dbUpdates.push(
-            client
+            mongo
               .db("blicstrip")
               .collection("strips")
               .updateOne(
@@ -201,13 +231,16 @@ app.get("/results", (req, res) => {
         articles.length
           ? Promise.all(
               articles.map(a =>
-                client
+                mongo
                   .db("blicstrip")
                   .collection("strips")
                   .findOne({ adresa: a })
-                  .then(res2 => {
-                    if (res2 && res2.img) {
-                      return Promise.resolve({ img: res.img });
+                  .then(strip => {
+                    if (strip && strip.img) {
+                      return Promise.resolve({
+                        img: strip.img,
+                        date: strip.date
+                      });
                     } else {
                       return axios(a);
                     }
@@ -218,14 +251,15 @@ app.get("/results", (req, res) => {
       );
   };
 
-  const fetch = (page = 0, responses = []) =>
+  const fetchAllStrips = async (page = 0, responses = []) => {
     fetchStrips(page ? "?strana=" + page : "").then(res =>
-      res.length
-        ? fetch(page + 1, [...responses, ...res])
-        : saveImgsAndGenerateHtml(responses)
+      res.every(r => !!r.img)
+        ? saveImgs([...responses, ...res])
+        : fetchAllStrips(page + 1, [...responses, ...res])
     );
+  };
 
-  // fetch();
+  fetchAllStrips(0);
 });
 
 app.listen(PORT, () => console.log(`server running on PORT ${PORT}`));
